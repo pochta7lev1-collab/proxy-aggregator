@@ -1,4 +1,4 @@
-"""Asynchronous proxy scraper with robust Base64 detection and whitelist tagging."""
+"""Asynchronous proxy scraper with deep Base64 detection and whitelist tagging."""
 
 from __future__ import annotations
 
@@ -65,13 +65,13 @@ def _decode_b64_safe(payload: str) -> str:
 
 
 def extract_proxies_from_raw(content: str) -> list[str]:
-    """Извлекает URI из текста с автоопределением Plain text, полного Base64 и построчного Base64."""
-    # 1. Прямой поиск в открытом тексте
+    """Извлекает URI из Plain text, чистого Base64 или построчно закодированных списков."""
+    # 1. Поиск открытых ссылок
     direct_matches = PROXY_URI_REGEX.findall(content)
     if direct_matches:
         return direct_matches
 
-    # 2. Очистка от комментариев (#, //) и декодирование всего тела как Base64
+    # 2. Очистка строк от комментариев (#, //) и декодирование всего тела
     lines = content.splitlines()
     clean_lines = [
         line.strip() for line in lines
@@ -85,7 +85,7 @@ def extract_proxies_from_raw(content: str) -> list[str]:
         if matches:
             return matches
 
-    # 3. Построчное декодирование Base64 (если каждая строка закодирована отдельно)
+    # 3. Построчное декодирование
     line_matches: list[str] = []
     for line in clean_lines:
         decoded_line = _decode_b64_safe(line)
@@ -97,7 +97,7 @@ def extract_proxies_from_raw(content: str) -> list[str]:
     if line_matches:
         return line_matches
 
-    # 4. Поиск вкрапленных Base64-блоков
+    # 4. Поиск вкрапленных Base64-блоков длиннее 64 символов
     embedded_blocks = re.findall(r"[A-Za-z0-9+/=_-]{64,}", content)
     for block in embedded_blocks:
         dec_block = _decode_b64_safe(block)
@@ -144,9 +144,9 @@ async def _fetch_single_source(
 async def scrape_all_sources(
     whitelist_sources: Sequence[str] | None = None,
     general_sources: Sequence[str] | None = None,
-    timeout_sec: float = 12.0,
+    timeout_sec: float = 15.0,
 ) -> list[ScrapedProxy]:
-    """Асинхронно скачивает все источники с сохранением меток белого списка."""
+    """Асинхронно скачивает все источники и проводит дедупликацию с сохранением меток."""
     wl_list = list(whitelist_sources) if whitelist_sources is not None else list(WHITELIST_SOURCES)
     gen_list = list(general_sources) if general_sources is not None else []
 
@@ -156,10 +156,10 @@ async def scrape_all_sources(
     ]
 
     headers = {
-        "User-Agent": "v2rayNG/1.8.5 (Linux; Android 13; en-US)",
+        "User-Agent": "v2rayNG/1.8.12 (Linux; Android 14; en-US)",
         "Accept": "*/*",
     }
-    connector = aiohttp.TCPConnector(ssl=False, limit=50)
+    connector = aiohttp.TCPConnector(ssl=False, limit=60)
 
     async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
         tasks = [
@@ -170,7 +170,6 @@ async def scrape_all_sources(
 
     flat_list = [proxy for sublist in results for proxy in sublist]
 
-    # Дедупликация: совпадение по URI без фрагмента, узел из WL имеет высший приоритет
     unique_map: dict[str, ScrapedProxy] = {}
     for item in flat_list:
         dedup_key = str(item).strip().split("#", 1)[0]
