@@ -6,7 +6,12 @@ import os
 from dataclasses import dataclass, field
 from typing import Final
 
-# Токен ipinfo.io из переменных окружения (опционально)
+from dotenv import load_dotenv
+
+# Безопасная загрузка .env файла: если файл отсутствует, ошибки не возникает
+load_dotenv()
+
+# Секреты и токены из переменных окружения
 IPINFO_TOKEN: Final[str] = os.getenv("IPINFO_TOKEN", "").strip()
 
 # Лимиты параллелизма и тайм-ауты
@@ -15,10 +20,10 @@ TCP_TIMEOUT_SECONDS: Final[float] = float(os.getenv("TCP_TIMEOUT_SECONDS", "3.0"
 HTTP_TIMEOUT_SECONDS: Final[float] = float(os.getenv("HTTP_TIMEOUT_SECONDS", "12.0"))
 MAX_LATENCY_MS: Final[float] = float(os.getenv("MAX_LATENCY_MS", "1500.0"))
 
-# Имя выходного файла подписки
+# Имя выходного артефакта подписки
 OUTPUT_FILE: Final[str] = os.getenv("OUTPUT_FILE", "sub.txt")
 
-# Целевые raw-источники публичных подписок (Plain text / Base64)
+# Целевые raw-источники публичных подписок
 DEFAULT_SOURCES: Final[list[str]] = [
     "https://raw.githubusercontent.com/freefq/free/master/v2",
     "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray",
