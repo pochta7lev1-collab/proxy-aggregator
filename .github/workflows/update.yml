@@ -2,7 +2,7 @@ name: Update Proxy Subscriptions
 
 on:
   schedule:
-    # Запуск каждые 4 часа: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+    # Запуск каждые 4 часа
     - cron: '0 */4 * * *'
   workflow_dispatch:
 
@@ -37,9 +37,6 @@ jobs:
       - name: Execute Aggregation & Testing
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
-          MAX_CONCURRENT_CHECKS: 200
-          TCP_TIMEOUT_SECONDS: 3.0
-          MAX_LATENCY_MS: 1500.0
         run: |
           python main.py
 
@@ -48,10 +45,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Временно сохраняем сгенерированный файл подписки
           cp sub.txt /tmp/sub.txt
 
-          # Проверяем наличие ветки output в удалённом репозитории
           if git ls-remote --exit-code --heads origin output; then
             git checkout output
           else
@@ -59,11 +54,9 @@ jobs:
             git rm -rf .
           fi
 
-          # Копируем свежий sub.txt
           cp /tmp/sub.txt sub.txt
           git add sub.txt
 
-          # Коммит и отправка только при наличии изменений
           if git diff --staged --quiet; then
             echo "No subscription updates detected. Clean tree."
           else
