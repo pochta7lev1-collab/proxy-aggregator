@@ -1,4 +1,4 @@
-"""Geo-resolution module with ipinfo.io caching and ISO flag emojis."""
+"""Geo-resolution module with in-memory caching and ISO flag emojis."""
 
 from __future__ import annotations
 
@@ -19,13 +19,13 @@ def country_code_to_flag(country_code: str) -> str:
         return DEFAULT_UNKNOWN_TAG
 
     code = country_code.upper()
-    # Смещение: Региональный индикатор 'A' (0x1F1E6) - ord('A') (65) = 127397
+    # Региональный индикатор 'A' (0x1F1E6 / 127462) - ord('A') (65) = 127397
     flag = "".join(chr(127397 + ord(char)) for char in code)
     return f"{flag} {code}"
 
 
 class GeoResolver:
-    """Разрешает геолокацию IP-адресов через ipinfo.io с локальным кэшем."""
+    """Разрешает геолокацию IP-адресов через ipinfo.io с кэшированием."""
 
     def __init__(self, token: str = "", timeout_sec: float = 4.0) -> None:
         self.token = token.strip()
@@ -49,10 +49,11 @@ class GeoResolver:
         if not ip_str or self._is_bypassed_ip(ip_str):
             return "UNK"
 
+        # Проверка локального in-memory кэша
         if ip_str in self._cache:
             return self._cache[ip_str]
 
-        # Если токен не передан или превышен рейт-лимит — экономим запросы
+        # Если токен не задан или лимит запросов исчерпан — не делаем сетевой запрос
         if not self.token or self._rate_limited:
             self._cache[ip_str] = "UNK"
             return "UNK"
@@ -72,10 +73,13 @@ class GeoResolver:
                         self._cache[ip_str] = raw_country
                         return raw_country
                 elif resp.status in (429, 403):
-                    logger.warning("ipinfo.io rate limit exceeded or invalid token (HTTP %d). Fallback to UNK.", resp.status)
+                    logger.warning(
+                        "ipinfo.io limit reached or unauthorized (HTTP %d). Switching to UNK fallback.",
+                        resp.status,
+                    )
                     self._rate_limited = True
-        except Exception:
-            pass
+        except Exception as err:
+            logger.debug("Geo lookup error for %s: %s", ip_str, err)
 
         self._cache[ip_str] = "UNK"
         return "UNK"
@@ -85,7 +89,7 @@ class GeoResolver:
         session: aiohttp.ClientSession,
         ip_str: str,
     ) -> str:
-        """Возвращает строку формата '🇩🇪 DE' или '🌐 UNK'."""
+        """Возвращает форматированную строку (например, '🇩🇪 DE' или '🌐 UNK')."""
         country_code = await self.get_country_code(session, ip_str)
         if country_code == "UNK":
             return DEFAULT_UNKNOWN_TAG
