@@ -34,7 +34,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Execute Aggregation & Testing
+      - name: Install Xray-core for Reality Deep Validation
+        run: |
+          XRAY_VER="v24.12.18"
+          echo "Installing Xray-core ${XRAY_VER}..."
+          curl -sL "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-64.zip" -o /tmp/xray.zip
+          sudo unzip -o -q /tmp/xray.zip xray -d /usr/local/bin/
+          sudo chmod +x /usr/local/bin/xray
+          xray version
+
+      - name: Execute Aggregator and Deep Reality Verification
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
         run: |
@@ -60,6 +69,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No subscription updates detected. Clean tree."
           else
-            git commit -m "chore(sub): update proxy list [skip ci]"
+            git commit -m "chore(sub): update verified proxy list [skip ci]"
             git push origin output
           fi
