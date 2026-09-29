@@ -1,4 +1,4 @@
-"""Proxy subscription builder with ISO flag generator and LionVPN profile title."""
+"""Proxy subscription builder with clean ISO flag resolution and profile header."""
 
 from __future__ import annotations
 
@@ -45,8 +45,8 @@ def is_node_whitelist(item: EnrichedNode) -> bool:
 
 
 def country_code_to_flag(country_code: str) -> str:
-    """Генерирует эмодзи флага по ISO-3166-1 alpha-2."""
-    if not country_code or len(country_code) != 2 or not country_code.isalpha() or country_code.upper() == "UNK":
+    """Генерирует эмодзи флага по стандарту ISO-3166-1 alpha-2."""
+    if not country_code or len(country_code) != 2 or not country_code.isalpha():
         return "🌐"
     code = country_code.upper()
     return "".join(chr(ord(c) + 127397) for c in code)
@@ -55,7 +55,7 @@ def country_code_to_flag(country_code: str) -> str:
 def extract_iso_country(raw_geo: str) -> tuple[str, str]:
     """
     Извлекает чистый 2-буквенный ISO-код страны и эмодзи флага.
-    Гарантированно устраняет баги дублирования (например, 'RU RU' -> flag='🇷🇺', code='RU').
+    Полностью устраняет баги вида 'RU RU' или '🌐 RU RU'.
     """
     if not raw_geo:
         return "🌐", "UNK"
@@ -64,12 +64,17 @@ def extract_iso_country(raw_geo: str) -> tuple[str, str]:
     if "UNK" in clean_str:
         return "🌐", "UNK"
 
-    # Ищем все двухбуквенные коды
+    # Ищем отдельные 2-буквенные слова (например, 'RU', 'DE', 'NL')
+    words = re.findall(r"\b[A-Z]{2}\b", clean_str)
+    for code in words:
+        if code != "UN":
+            return country_code_to_flag(code), code
+
+    # Если точные границы слов не найдены, ищем любые 2 латинские буквы
     letters = re.findall(r"[A-Z]{2}", clean_str)
     for code in letters:
-        if code != "UN":  # Исключаем артефакты от UNK
-            flag = country_code_to_flag(code)
-            return flag, code
+        if code != "UN":
+            return country_code_to_flag(code), code
 
     return "🌐", "UNK"
 
@@ -108,7 +113,7 @@ def build_subscription(
     profile_title: str = "LionVPN",
     profile_update_interval: int = 4,
 ) -> tuple[int, Path]:
-    """Генерирует финальную Base64-подписку без пинга в именах и без дублирования страны."""
+    """Формирует Base64-подписку с чистыми именами узлов (без пинга и без дублей кода страны)."""
     category_counters: dict[str, int] = {}
     formatted_uris: list[str] = []
 
@@ -116,7 +121,7 @@ def build_subscription(
         is_wl = is_node_whitelist(item)
         flag, country_code = extract_iso_country(item.geo_tag)
 
-        # Формирование префикса строго по ТЗ
+        # Формирование префикса строго по стандарту
         if is_wl:
             base_prefix = f"🏳️ [WL] {flag} {country_code}"
         else:
@@ -125,7 +130,7 @@ def build_subscription(
         count = category_counters.get(base_prefix, 0) + 1
         category_counters[base_prefix] = count
 
-        # Формат: '🏳️ [WL] 🇷🇺 RU #01' или '🇩🇪 DE #01'
+        # Формат: '🏳️ [WL] 🇷🇺 RU #01' или '🇳🇱 NL #01'
         node_name = f"{base_prefix} #{count:02d}"
         formatted_uris.append(format_node_uri(item.checked_node, node_name))
 
