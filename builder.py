@@ -1,30 +1,62 @@
-"""Proxy subscription builder and formatter."""
+"""Proxy subscription builder and profile formatter."""
 
 from __future__ import annotations
 
 import base64
 import json
 import logging
-import urllib.parse
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 from checker import CheckedNode
-from parser import safe_b64decode
 
 logger = logging.getLogger(__name__)
+
+
+def safe_b64decode(payload: str) -> str:
+    """Безопасно декодирует строку Base64 с паддингом."""
+    cleaned = payload.strip().replace("-", "+").replace("_", "/")
+    padding = "=" * (-len(cleaned) % 4)
+    raw_bytes = base64.b64decode(cleaned + padding)
+    return raw_bytes.decode("utf-8", errors="ignore")
 
 
 @dataclass(slots=True, frozen=True)
 class EnrichedNode:
     checked_node: CheckedNode
     geo_tag: str
+    is_whitelist: bool = False
+
+
+def is_node_whitelist(item: EnrichedNode) -> bool:
+    """Проверяет принадлежность узла к белым спискам по всем доступным атрибутам."""
+    if getattr(item, "is_whitelist", False):
+        return True
+
+    checked_node = getattr(item, "checked_node", None)
+    if checked_node is not None:
+        if getattr(checked_node, "is_whitelist", False):
+            return True
+        node = getattr(checked_node, "node", None)
+        if node is not None:
+            if getattr(node, "is_whitelist", False):
+                return True
+            raw_uri = getattr(node, "raw_uri", None)
+            if raw_uri is not None:
+                if getattr(raw_uri, "is_whitelist", False):
+                    return True
+                try:
+                    from scraper import is_uri_whitelisted
+                    if is_uri_whitelisted(str(raw_uri)):
+                        return True
+                except ImportError:
+                    pass
+    return False
 
 
 def _format_vmess_uri(raw_uri: str, new_name: str) -> str:
-    """Обновляет имя узла VMess в поле 'ps' внутри Base64 JSON."""
+    """Обновляет имя узла VMess через Base64 JSON поле 'ps'."""
     try:
         raw_body = raw_uri[8:].split("#", 1)[0]
         decoded = safe_b64decode(raw_body)
@@ -34,86 +66,69 @@ def _format_vmess_uri(raw_uri: str, new_name: str) -> str:
             compact_json = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
             encoded = base64.b64encode(compact_json.encode("utf-8")).decode("utf-8")
             return f"vmess://{encoded}"
-    except Exception as err:
-        logger.debug("Failed to update VMess JSON ps field: %s", err)
-
-    # Резервный вариант через обновление фрагмента URI
-    parsed = urllib.parse.urlsplit(raw_uri)
-    return urllib.parse.urlunsplit(parsed._replace(fragment=new_name))
+    except Exception:
+        pass
+    base = raw_uri.split("#", 1)[0]
+    return f"{base}#{new_name}"
 
 
 def _format_standard_uri(raw_uri: str, new_name: str) -> str:
-    """Обновляет фрагмент URI через urllib.parse (VLESS, Trojan, Shadowsocks)."""
-    try:
-        parsed = urllib.parse.urlsplit(raw_uri)
-        return urllib.parse.urlunsplit(parsed._replace(fragment=new_name))
-    except Exception:
-        base = raw_uri.split("#", 1)[0]
-        return f"{base}#{new_name}"
+    """Обновляет имя узла VLESS / Trojan / Shadowsocks через фрагмент URI."""
+    base = raw_uri.split("#", 1)[0]
+    return f"{base}#{new_name}"
 
 
 def format_node_uri(node: CheckedNode, new_name: str) -> str:
-    """Направляет URI на соответствующий форматировщик в зависимости от протокола."""
-    if node.node.protocol == "vmess":
-        return _format_vmess_uri(node.node.raw_uri, new_name)
-    return _format_standard_uri(node.node.raw_uri, new_name)
+    """Перезаписывает имя узла в зависимости от протокола без упоминания задержки."""
+    raw_uri = str(node.node.raw_uri)
+    if node.node.protocol.lower() == "vmess":
+        return _format_vmess_uri(raw_uri, new_name)
+    return _format_standard_uri(raw_uri, new_name)
 
 
 def build_subscription(
     nodes: Sequence[EnrichedNode],
-    max_latency_ms: float,
     output_filepath: str,
-    subscription_title: str = "LionVPN",
-    update_interval_hours: int = 4,
+    profile_title: str = "LionVPN",
+    profile_update_interval: int = 4,
 ) -> tuple[int, Path]:
-    """
-    Фильтрует узлы по задержке, сортирует по возрастанию пинга, присваивает
-    порядковые номера внутри каждой страны, добавляет служебные заголовки
-    и компилирует подписку в единый Base64-файл.
-    """
-    # 1. Фильтрация по допустимой задержке
-    valid_nodes = [
-        item for item in nodes
-        if item.checked_node.latency_ms <= max_latency_ms
-    ]
-
-    # 2. Сортировка по возрастанию задержки (быстрые серверы идут первыми)
-    sorted_nodes = sorted(valid_nodes, key=lambda x: x.checked_node.latency_ms)
-
-    # 3. Переименование серверов в формат: {Флаг} {Код} #{Порядковый номер по стране}
-    # Например: 🇩🇪 DE #01, 🇩🇪 DE #02, 🇳🇱 NL #01
-    country_counters: dict[str, int] = defaultdict(int)
+    """Формирует финальную Base64-подписку с мета-заголовками профиля."""
+    category_counters: dict[str, int] = {}
     formatted_uris: list[str] = []
 
-    for item in sorted_nodes:
-        tag = item.geo_tag.strip() or "🌐 UNK"
-        country_counters[tag] += 1
-        index = country_counters[tag]
-        clean_node_name = f"{tag} #{index:02d}"
+    for item in nodes:
+        is_wl = is_node_whitelist(item)
+        geo_tag = item.geo_tag.strip() if item.geo_tag else "🌐 UNK"
 
-        formatted_uris.append(format_node_uri(item.checked_node, clean_node_name))
+        # Формат: 🏳️ [WL] 🇩🇪 DE либо 🇩🇪 DE
+        base_prefix = f"🏳️ [WL] {geo_tag}" if is_wl else geo_tag
 
-    # 4. Формирование служебных заголовков для авто-именования профиля клиентами
-    # (поддерживается Happ, NekoBox, v2rayNG, Sing-box и др.)
-    header_lines = [
-        f"# profile-title: {subscription_title}",
-        f"# profile-update-interval: {update_interval_hours}",
+        count = category_counters.get(base_prefix, 0) + 1
+        category_counters[base_prefix] = count
+
+        # Номер по стране: #01, #02...
+        node_name = f"{base_prefix} #{count:02d}"
+        formatted_uris.append(format_node_uri(item.checked_node, node_name))
+
+    # Служебные заголовки автоматического профиля
+    profile_headers = [
+        f"# profile-title: {profile_title}",
+        f"# profile-update-interval: {profile_update_interval}",
     ]
 
-    # 5. Сборка полного содержимого и кодирование в Base64
-    full_payload = "\n".join(header_lines + formatted_uris)
-    encoded_bytes = base64.b64encode(full_payload.encode("utf-8"))
+    # Сборка и Base64-кодирование
+    combined_payload = "\n".join(profile_headers + formatted_uris)
+    encoded_bytes = base64.b64encode(combined_payload.encode("utf-8"))
 
-    # 6. Запись в файл
     out_path = Path(output_filepath)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(encoded_bytes)
 
     logger.info(
-        "Successfully compiled %d nodes (title: '%s', interval: %dh) into '%s'",
+        "Successfully compiled %d nodes (Profile: %s, Interval: %dh) into '%s'",
         len(formatted_uris),
-        subscription_title,
-        update_interval_hours,
+        profile_title,
+        profile_update_interval,
         out_path,
     )
     return len(formatted_uris), out_path
