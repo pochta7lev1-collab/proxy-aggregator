@@ -149,7 +149,7 @@ def build_subscription(
         profile_title,
         out_path,
     )
-    return len(formatted_uris), out_path"""Proxy subscription builder and profile formatter."""
+    return len(formatted_uris), out_path
 
 from __future__ import annotations
 
