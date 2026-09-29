@@ -1,4 +1,4 @@
-"""Asynchronous proxy scraper with whitelist tagging."""
+"""Asynchronous proxy scraper with robust Base64 detection and whitelist tagging."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Final, Sequence
 
 import aiohttp
 
-from config import SourceItem, WHITELIST_SOURCES, GENERAL_SOURCES
+from config import SourceItem, WHITELIST_SOURCES
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,6 @@ PROXY_URI_REGEX: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
-# Глобальный реестр для сквозной проверки принадлежности к белому списку
 WHITELIST_URI_REGISTRY: set[str] = set()
 
 
@@ -41,27 +40,73 @@ class ScrapedProxy(str):
 
 
 def register_whitelist_uri(uri: str) -> None:
-    """Добавляет базовый URI в реестр белых списков."""
     base = uri.strip().split("#", 1)[0]
     if base:
         WHITELIST_URI_REGISTRY.add(base)
 
 
 def is_uri_whitelisted(uri: str) -> bool:
-    """Проверяет принадлежность URI к белому списку."""
     if getattr(uri, "is_whitelist", False):
         return True
     base = str(uri).strip().split("#", 1)[0]
     return base in WHITELIST_URI_REGISTRY
 
 
-def _safe_base64_decode_lines(text: str) -> str:
-    cleaned = "".join(text.split())
-    padding = "=" * (-len(cleaned) % 4)
+def _decode_b64_safe(payload: str) -> str:
+    clean = re.sub(r"[\s\r\n]+", "", payload).replace("-", "+").replace("_", "/")
+    if not clean:
+        return ""
+    padding = "=" * (-len(clean) % 4)
     try:
-        return base64.b64decode(cleaned + padding).decode("utf-8", errors="ignore")
+        decoded = base64.b64decode(clean + padding)
+        return decoded.decode("utf-8", errors="ignore")
     except Exception:
         return ""
+
+
+def extract_proxies_from_raw(content: str) -> list[str]:
+    """Извлекает URI из текста с автоопределением Plain text, полного Base64 и построчного Base64."""
+    # 1. Прямой поиск в открытом тексте
+    direct_matches = PROXY_URI_REGEX.findall(content)
+    if direct_matches:
+        return direct_matches
+
+    # 2. Очистка от комментариев (#, //) и декодирование всего тела как Base64
+    lines = content.splitlines()
+    clean_lines = [
+        line.strip() for line in lines
+        if line.strip() and not line.strip().startswith(("#", "//"))
+    ]
+    full_payload = "".join(clean_lines)
+
+    decoded_full = _decode_b64_safe(full_payload)
+    if decoded_full:
+        matches = PROXY_URI_REGEX.findall(decoded_full)
+        if matches:
+            return matches
+
+    # 3. Построчное декодирование Base64 (если каждая строка закодирована отдельно)
+    line_matches: list[str] = []
+    for line in clean_lines:
+        decoded_line = _decode_b64_safe(line)
+        if decoded_line:
+            found = PROXY_URI_REGEX.findall(decoded_line)
+            if found:
+                line_matches.extend(found)
+
+    if line_matches:
+        return line_matches
+
+    # 4. Поиск вкрапленных Base64-блоков
+    embedded_blocks = re.findall(r"[A-Za-z0-9+/=_-]{64,}", content)
+    for block in embedded_blocks:
+        dec_block = _decode_b64_safe(block)
+        if dec_block:
+            found = PROXY_URI_REGEX.findall(dec_block)
+            if found:
+                line_matches.extend(found)
+
+    return line_matches
 
 
 async def _fetch_single_source(
@@ -79,13 +124,8 @@ async def _fetch_single_source(
                 logger.warning("Failed to fetch %s (HTTP %d)", url, resp.status)
                 return []
 
-            content = await resp.text(encoding="utf-8", errors="ignore")
-            raw_matches = PROXY_URI_REGEX.findall(content)
-
-            if not raw_matches:
-                decoded_text = _safe_base64_decode_lines(content)
-                if decoded_text:
-                    raw_matches = PROXY_URI_REGEX.findall(decoded_text)
+            content = await resp.text(encoding="utf-8", errors="replace")
+            raw_matches = extract_proxies_from_raw(content)
 
             results: list[ScrapedProxy] = []
             for match in raw_matches:
@@ -96,39 +136,24 @@ async def _fetch_single_source(
 
             logger.info("Extracted %d URIs [%s] from %s", len(results), category, url)
             return results
-    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-        logger.warning("Network error fetching %s: %s", url, err)
-        return []
     except Exception as err:
-        logger.error("Unexpected error parsing %s: %s", url, err)
+        logger.warning("Error fetching %s: %s", url, err)
         return []
 
 
 async def scrape_all_sources(
-    sources: Sequence[SourceItem | str] | None = None,
-    timeout_sec: float = 12.0,
-    *,
     whitelist_sources: Sequence[str] | None = None,
-    regular_sources: Sequence[str] | None = None,
+    general_sources: Sequence[str] | None = None,
+    timeout_sec: float = 12.0,
 ) -> list[ScrapedProxy]:
-    """Асинхронно опрашивает все источники и выполняет дедупликацию с сохранением меток."""
-    whitelist_set = set(WHITELIST_SOURCES)
-    resolved_sources: list[SourceItem] = []
+    """Асинхронно скачивает все источники с сохранением меток белого списка."""
+    wl_list = list(whitelist_sources) if whitelist_sources is not None else list(WHITELIST_SOURCES)
+    gen_list = list(general_sources) if general_sources is not None else []
 
-    if sources is not None:
-        for s in sources:
-            if isinstance(s, SourceItem):
-                resolved_sources.append(s)
-            elif isinstance(s, str):
-                resolved_sources.append(SourceItem(url=s, is_whitelist=(s in whitelist_set)))
-    elif whitelist_sources is not None or regular_sources is not None:
-        if whitelist_sources:
-            resolved_sources.extend(SourceItem(url=u, is_whitelist=True) for u in whitelist_sources)
-        if regular_sources:
-            resolved_sources.extend(SourceItem(url=u, is_whitelist=False) for u in regular_sources)
-    else:
-        from config import ALL_SOURCES
-        resolved_sources = list(ALL_SOURCES)
+    resolved_sources = [
+        *(SourceItem(url=u, is_whitelist=True) for u in wl_list),
+        *(SourceItem(url=u, is_whitelist=False) for u in gen_list),
+    ]
 
     headers = {
         "User-Agent": "v2rayNG/1.8.5 (Linux; Android 13; en-US)",
@@ -143,7 +168,7 @@ async def scrape_all_sources(
         ]
         results = await asyncio.gather(*tasks, return_exceptions=False)
 
-    flat_list: list[ScrapedProxy] = [proxy for sublist in results for proxy in sublist]
+    flat_list = [proxy for sublist in results for proxy in sublist]
 
     # Дедупликация: совпадение по URI без фрагмента, узел из WL имеет высший приоритет
     unique_map: dict[str, ScrapedProxy] = {}
